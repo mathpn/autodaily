@@ -5,11 +5,41 @@ from contextlib import chdir
 from textwrap import dedent
 from typing import NamedTuple
 
-from langchain.callbacks.manager import CallbackManager
-from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
-from langchain.chains import LLMChain
+from langchain.chains import (
+    LLMChain,
+    MapReduceDocumentsChain,
+    ReduceDocumentsChain,
+    StuffDocumentsChain,
+)
 from langchain.llms import GPT4All
 from langchain.prompts import PromptTemplate
+from langchain.schema import Document
+
+MAP_PROMPT_TEMPLATE = """
+    [INST]
+    Generate a concise task description in past tense based on the git commit message and git diff provided.
+    Your response should state clearly in a single line what improvements or fixes were made to the code and what task has been achieved.
+    The git diff provides all changes made to the code, therefore you can use it to interpret how the code changed.
+    {context}
+    [/INST]
+"""
+
+REDUCE_PROMPT_TEMPLATE = """
+    [INST]
+    The following is set of description of tasks I've done:
+    {doc_summaries}
+    Take these and distill it into a final, consolidated Markdown list of tasks and achievements.
+    [/INST]
+    Helpful Answer:
+"""
+
+CTX_TEMPLATE = """
+    Git message:
+    {message}
+
+    Git diff:
+    {diff}
+"""
 
 
 class Commit(NamedTuple):
@@ -17,68 +47,58 @@ class Commit(NamedTuple):
     diff: str
 
 
-def get_chain():
+def load_model():
     # local_path = f"{os.environ['HOME']}/.cache/gpt4all/orca-mini-3b-gguf2-q4_0.gguf"
     local_path = (
         f"{os.environ['HOME']}/.cache/gpt4all/mistral-7b-instruct-v0.1.Q4_0.gguf"
-    )
-    callback_manager = CallbackManager([StreamingStdOutCallbackHandler()])
-
-    SYSTEM_PROMPT = ""
-
-    PROMPT_TEMPLATE = """
-    [INST]
-    Generate a concise task description in past tense based on the git commit message and git diff provided.
-    Your response should state clearly in a single line what improvements were made to the code and what task has been achieved.
-    The git diff provides all changes made to the code, therefore you can use it to interpret how the code changed.
-
-    Git message:
-    {message}
-
-    Git diff:
-    {diff}
-
-    [/INST]
-    """
-
-    # SYSTEM_PROMPT = "### System:\nYou are an AI assistant that follows instruction extremely well. Help as much as you can.\n\n"
-    #
-    # PROMPT_TEMPLATE = """
-    # ### System:
-    # Generate a concise task description in past tense based on the git commit message and git diff provided.
-    # Your response should state clearly in a single line what improvements were made to the code and what task has been achieved.
-    # The git diff provides all changes made to the code, therefore you can use it to interpret how the code changed.
-    #
-    # ### User
-    # Git message:
-    # {message}
-    #
-    # Git diff:
-    # {diff}
-    #
-    # ### Response:\n
-    # """
-
-    prompt = PromptTemplate(
-        template=f"{SYSTEM_PROMPT}{PROMPT_TEMPLATE}", input_variables=["commits"]
     )
 
     # FIXME n_threads
     llm = GPT4All(
         model=local_path,
-        callback_manager=callback_manager,
         verbose=True,
         # device="nvidia",
         n_threads=14,
         streaming=True,
     )
-    llm_chain = LLMChain(prompt=prompt, llm=llm)
+    return llm, ""
 
-    def run_llm(commit: Commit) -> None:
-        diff = dedent(commit.diff)
-        message = dedent(commit.message)
-        # print(prompt.format(diff=diff, message=message))
-        llm_chain.run(diff=diff, message=message)
+
+def get_chain():
+    llm, system_prompt = load_model()
+
+    map_prompt = PromptTemplate.from_template(
+        f"{system_prompt}{dedent(MAP_PROMPT_TEMPLATE)}"
+    )
+    map_chain = LLMChain(llm=llm, prompt=map_prompt)
+
+    reduce_prompt = PromptTemplate.from_template(dedent(REDUCE_PROMPT_TEMPLATE))
+    reduce_chain = LLMChain(llm=llm, prompt=reduce_prompt)
+
+    combine_docs_chain = StuffDocumentsChain(
+        llm_chain=reduce_chain,
+        document_prompt=PromptTemplate.from_template("{page_content}"),
+        document_variable_name="doc_summaries",
+    )
+
+    reduce_docs_chain = ReduceDocumentsChain(
+        combine_documents_chain=combine_docs_chain,
+        collapse_documents_chain=combine_docs_chain,
+        token_max=1024,  # XXX
+    )
+
+    map_reduce_chain = MapReduceDocumentsChain(
+        llm_chain=map_chain,
+        reduce_documents_chain=reduce_docs_chain,
+        document_variable_name="context",
+    )
+
+    def run_llm(commits: list[Commit]) -> None:
+        docs = [
+            dedent(CTX_TEMPLATE.format(message=c.message, diff=c.diff)) for c in commits
+        ]
+        docs = [Document(page_content=doc) for doc in docs]
+        print(map_reduce_chain.run(docs))
         print()
 
     return run_llm
@@ -134,10 +154,7 @@ def main():
         commits = commits[: args.limit]
 
     chain = get_chain()
-    for commit in commits:
-        print("--------------------------------")
-        print(f"-> {commit.message}")
-        chain(commit)
+    chain(commits)
 
 
 if __name__ == "__main__":
