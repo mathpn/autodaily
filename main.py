@@ -2,18 +2,17 @@ import argparse
 import os
 import subprocess
 from contextlib import chdir
+from functools import partial
 from textwrap import dedent
 from typing import NamedTuple
 
-from langchain.chains import (
-    LLMChain,
-    MapReduceDocumentsChain,
-    ReduceDocumentsChain,
-    StuffDocumentsChain,
-)
+from langchain.chains.combine_documents import collapse_docs, split_list_of_docs
+from langchain.globals import set_debug
 from langchain.llms import GPT4All
 from langchain.prompts import PromptTemplate
-from langchain.schema import Document
+from langchain.schema import StrOutputParser
+
+MAX_TOKENS = 1024
 
 MAP_PROMPT_TEMPLATE = """
     [INST]
@@ -21,6 +20,13 @@ MAP_PROMPT_TEMPLATE = """
     Your response should state clearly in a single line what improvements or fixes were made to the code and what task has been achieved.
     The git diff provides all changes made to the code, therefore you can use it to interpret how the code changed.
     {context}
+    [/INST]
+"""
+
+COLLAPSE_PROMPT_TEMPLATE = """
+    [INST]
+    Summarise the following documents:
+    {doc_summaries}
     [/INST]
 """
 
@@ -64,41 +70,91 @@ def load_model():
     return llm, ""
 
 
+def format_document(
+    commit: Commit, prompt: PromptTemplate, llm, max_tokens: int = MAX_TOKENS
+):
+    prompt_value = prompt.format(message=commit.message, diff=commit.diff)
+    n_tokens = llm.get_num_tokens(prompt_value)
+
+    diff = commit.diff
+    diff_lines = diff.splitlines()
+    if len(diff_lines) == 1 and n_tokens > max_tokens:
+        diff = ""  # FIXME better handling
+
+    while n_tokens > max_tokens:
+        if not diff_lines:
+            break
+        diff_lines = diff_lines[:-1]
+        diff = "\n".join(diff_lines)
+        prompt_value = prompt.format(message=commit.message, diff=diff)
+        n_tokens = llm.get_num_tokens(prompt_value)
+
+    message = commit.message
+    while n_tokens > max_tokens:
+        message = message[:-2]
+        prompt_value = prompt.format(message=message, diff=diff)
+        n_tokens = llm.get_num_tokens(prompt_value)
+
+    return prompt_value
+
+
+def format_docs(docs) -> str:
+    return "\n\n".join(docs)
+
+
 def get_chain():
     llm, system_prompt = load_model()
 
+    document_prompt = PromptTemplate.from_template(system_prompt + dedent(CTX_TEMPLATE))
     map_prompt = PromptTemplate.from_template(
-        f"{system_prompt}{dedent(MAP_PROMPT_TEMPLATE)}"
-    )
-    map_chain = LLMChain(llm=llm, prompt=map_prompt)
-
-    reduce_prompt = PromptTemplate.from_template(dedent(REDUCE_PROMPT_TEMPLATE))
-    reduce_chain = LLMChain(llm=llm, prompt=reduce_prompt)
-
-    combine_docs_chain = StuffDocumentsChain(
-        llm_chain=reduce_chain,
-        document_prompt=PromptTemplate.from_template("{page_content}"),
-        document_variable_name="doc_summaries",
+        system_prompt + dedent(MAP_PROMPT_TEMPLATE)
     )
 
-    reduce_docs_chain = ReduceDocumentsChain(
-        combine_documents_chain=combine_docs_chain,
-        collapse_documents_chain=combine_docs_chain,
-        token_max=1024,  # XXX
+    map_prompt_tokens = llm.get_num_tokens(map_prompt.format(context=""))
+    partial_format_document = partial(
+        format_document,
+        prompt=document_prompt,
+        llm=llm,
+        max_tokens=MAX_TOKENS - map_prompt_tokens,
     )
 
-    map_reduce_chain = MapReduceDocumentsChain(
-        llm_chain=map_chain,
-        reduce_documents_chain=reduce_docs_chain,
-        document_variable_name="context",
+    map_chain = (
+        {"context": partial_format_document} | map_prompt | llm | StrOutputParser()
+    ).with_config(run_name="Summarize commit")
+
+    collapse_chain = (
+        {"doc_summaries": format_docs}
+        | PromptTemplate.from_template(system_prompt + dedent(COLLAPSE_PROMPT_TEMPLATE))
+        | llm
+        | StrOutputParser()
+    )
+
+    def get_num_tokens(docs):
+        return llm.get_num_tokens(format_docs(docs))
+
+    def collapse(docs, config, max_tokens=MAX_TOKENS):
+        collapse_ct = 1
+        while get_num_tokens(docs) > max_tokens:
+            config["run_name"] = f"Collapse {collapse_ct}"
+            invoke = partial(collapse_chain.invoke, config=config)
+            split_docs = split_list_of_docs(docs, get_num_tokens, max_tokens)
+            docs = [collapse_docs(_docs, invoke) for _docs in split_docs]
+            collapse_ct += 1
+        return docs
+
+    reduce_chain = (
+        {"doc_summaries": format_docs}
+        | PromptTemplate.from_template(REDUCE_PROMPT_TEMPLATE)
+        | llm
+        | StrOutputParser()
+    ).with_config(run_name="Reduce")
+
+    map_reduce = (map_chain.map() | collapse | reduce_chain).with_config(
+        run_name="Map Reduce"
     )
 
     def run_llm(commits: list[Commit]) -> None:
-        docs = [
-            dedent(CTX_TEMPLATE.format(message=c.message, diff=c.diff)) for c in commits
-        ]
-        docs = [Document(page_content=doc) for doc in docs]
-        print(map_reduce_chain.run(docs))
+        print(map_reduce.invoke(commits, config={"max_concurrency": 1}))
         print()
 
     return run_llm
@@ -147,9 +203,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("repo_path", type=str)
     parser.add_argument("--limit", type=int)
+    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
+    if args.debug:
+        set_debug(True)
+
     commits = get_commits(args.repo_path)
+
     if args.limit:
         commits = commits[: args.limit]
 
