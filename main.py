@@ -201,7 +201,7 @@ def get_commits(repo_path: str) -> list[Commit]:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("repo_path", type=str)
+    parser.add_argument("--repo-paths", type=str, nargs="+", required=True)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
@@ -209,13 +209,18 @@ def main():
     if args.debug:
         set_debug(True)
 
-    commits = get_commits(args.repo_path)
+    repo_commits = {}
+    for repo_path in args.repo_paths:
+        commits = get_commits(repo_path)
+        repo_commits[repo_path] = commits
 
-    if args.limit:
-        commits = commits[: args.limit]
+    for repo_path, commits in repo_commits.items():
+        print(f"Summarizing tasks for {repo_path}")
+        if args.limit:
+            commits = commits[: args.limit]
 
-    chain = get_chain()
-    chain(commits)
+        chain = get_chain()
+        chain(commits)
 
 
 if __name__ == "__main__":
