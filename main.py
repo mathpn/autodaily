@@ -1,4 +1,5 @@
 import argparse
+import logging
 import os
 import subprocess
 from contextlib import chdir
@@ -11,6 +12,7 @@ from langchain.globals import set_debug
 from langchain.llms import GPT4All
 from langchain.prompts import PromptTemplate
 from langchain.schema import StrOutputParser
+from rich.console import Console
 
 MAX_TOKENS = 1024
 
@@ -153,9 +155,8 @@ def get_chain():
         run_name="Map Reduce"
     )
 
-    def run_llm(commits: list[Commit]) -> None:
-        print(map_reduce.invoke(commits, config={"max_concurrency": 1}))
-        print()
+    def run_llm(commits: list[Commit]) -> str:
+        return map_reduce.invoke(commits, config={"max_concurrency": 1})
 
     return run_llm
 
@@ -206,21 +207,45 @@ def main():
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
+    # FIXME something prettier to hide initial logging
+    logging.disable(logging.CRITICAL)
+
+    import transformers
+
+    logging.disable(logging.NOTSET)
+
+    transformers.logging.set_verbosity_error()
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.ERROR)
+
     if args.debug:
         set_debug(True)
+        transformers.logging.set_verbosity_debug()
+        logger.setLevel(logging.DEBUG)
 
     repo_commits = {}
     for repo_path in args.repo_paths:
         commits = get_commits(repo_path)
         repo_commits[repo_path] = commits
 
-    for repo_path, commits in repo_commits.items():
-        print(f"Summarizing tasks for {repo_path}")
-        if args.limit:
-            commits = commits[: args.limit]
+    console = Console()
 
-        chain = get_chain()
-        chain(commits)
+    repo_outputs = []
+    for repo_path, commits in repo_commits.items():
+        with console.status(f"[bold green]Summarizing tasks for {repo_path}..."):
+            if args.limit:
+                commits = commits[: args.limit]
+                console.log(f"limiting to {args.limit} commits")
+
+            chain = get_chain()
+            llm_output = chain(commits)
+            repo_outputs.append((repo_path, llm_output))
+
+    print()
+    for path, output in sorted(repo_outputs, key=lambda x: x[0]):
+        console.print(f"[bold green] • Summary for repository {path}")
+        console.print(output)
+        print()
 
 
 if __name__ == "__main__":
