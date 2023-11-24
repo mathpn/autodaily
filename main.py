@@ -3,6 +3,7 @@ import logging
 import os
 import subprocess
 from contextlib import chdir
+from datetime import date, datetime, timedelta
 from functools import partial
 from textwrap import dedent
 from typing import NamedTuple
@@ -178,10 +179,10 @@ def _parse_git_log(output: bytes) -> list[Commit]:
     return commits
 
 
-def get_commits(repo_path: str) -> list[Commit]:
+def get_commits(repo_path: str, since_date: date) -> list[Commit]:
+    since_str = since_date.isoformat()
     with chdir(repo_path):
         # TODO add author filter
-        # TODO add date filter
         sp = subprocess.run(
             [
                 "git",
@@ -191,6 +192,8 @@ def get_commits(repo_path: str) -> list[Commit]:
                 "--pretty=oneline",
                 "--no-merges",
                 "--all",
+                "--since",
+                since_str,
             ],
             capture_output=True,
             check=True,
@@ -201,10 +204,23 @@ def get_commits(repo_path: str) -> list[Commit]:
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
     parser.add_argument("--repo-paths", type=str, nargs="+", required=True)
-    parser.add_argument("--limit", type=int)
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=25,
+        help="limit to the number of commits to analyze in each repository",
+    )
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument(
+        "--lookback",
+        type=int,
+        default=1,
+        help="number of days to look back in git logs",
+    )
     args = parser.parse_args()
 
     # FIXME something prettier to hide initial logging
@@ -223,20 +239,26 @@ def main():
         transformers.logging.set_verbosity_debug()
         logger.setLevel(logging.DEBUG)
 
-    repo_commits = {}
-    for repo_path in args.repo_paths:
-        commits = get_commits(repo_path)
-        repo_commits[repo_path] = commits
-
     console = Console()
+    since_date = (datetime.now() - timedelta(days=args.lookback)).date()
 
     repo_outputs = []
-    for repo_path, commits in repo_commits.items():
-        with console.status(f"[bold green]Summarizing tasks for {repo_path}..."):
-            if args.limit:
-                commits = commits[: args.limit]
-                console.log(f"limiting to {args.limit} commits")
+    for repo_path in args.repo_paths:
+        commits = get_commits(repo_path, since_date)
 
+        if not commits:
+            console.log(
+                f"[bold red]WARNING[/bold red]: no commits in {repo_path} since {since_date}"
+            )
+            continue
+
+        if len(commits) >= args.limit:
+            console.log(f"limiting from {len(commits)} to {args.limit} commits")
+            commits = commits[: args.limit]
+
+        with console.status(
+            f"[bold green]Summarizing tasks from {len(commits)} commits in {repo_path}..."
+        ):
             chain = get_chain()
             llm_output = chain(commits)
             repo_outputs.append((repo_path, llm_output))
