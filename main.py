@@ -179,25 +179,26 @@ def _parse_git_log(output: bytes) -> list[Commit]:
     return commits
 
 
-def get_commits(repo_path: str, since_date: date) -> list[Commit]:
+def get_commits(
+    repo_path: str, since_date: date, author_name: str | None
+) -> list[Commit]:
     since_str = since_date.isoformat()
+    cmd = [
+        "git",
+        "--no-pager",
+        "log",
+        "--no-decorate",
+        "--oneline",
+        "--no-merges",
+        "--all",
+        "--since",
+        since_str,
+    ]
+    if author_name is not None:
+        cmd.append(f"--author={author_name}")
+
     with chdir(repo_path):
-        # TODO add author filter
-        sp = subprocess.run(
-            [
-                "git",
-                "--no-pager",
-                "log",
-                "--no-decorate",
-                "--pretty=oneline",
-                "--no-merges",
-                "--all",
-                "--since",
-                since_str,
-            ],
-            capture_output=True,
-            check=True,
-        )
+        sp = subprocess.run(cmd, capture_output=True, check=True)
 
         commits = _parse_git_log(sp.stdout)
         return commits
@@ -214,6 +215,7 @@ def main():
         default=25,
         help="limit to the number of commits to analyze in each repository",
     )
+    parser.add_argument("--author", type=str, help="author name to filter commits")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument(
         "--lookback",
@@ -244,7 +246,7 @@ def main():
 
     repo_outputs = []
     for repo_path in args.repo_paths:
-        commits = get_commits(repo_path, since_date)
+        commits = get_commits(repo_path, since_date, args.author)
 
         if not commits:
             console.log(
