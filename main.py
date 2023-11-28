@@ -52,6 +52,7 @@ CTX_TEMPLATE = """
 
 
 class Commit(NamedTuple):
+    branch: str
     message: str
     diff: str
 
@@ -162,13 +163,19 @@ def get_chain():
     return run_llm
 
 
-def _parse_git_log(output: bytes) -> list[Commit]:
+def _parse_git_log(branch: str, output: bytes, seen_commits: set[str]) -> list[Commit]:
     commits: list[Commit] = []
     out_lines = output.decode("utf-8").split("\n")
+
     for line in out_lines:
         if not line:
             continue
+
         commit_hash, message = line.split(" ", maxsplit=1)
+
+        if commit_hash in seen_commits:
+            continue
+
         sp = subprocess.run(
             ["git", "--no-pager", "diff", "--minimal", f"{commit_hash}^!"],
             capture_output=True,
@@ -179,8 +186,10 @@ def _parse_git_log(output: bytes) -> list[Commit]:
                 f"git diff command returned non-zero status {sp.returncode}\n{sp.stderr.decode('utf-8')}"
             )
 
+        seen_commits.add(commit_hash)
         diff = sp.stdout.decode("utf-8")
-        commits.append(Commit(message, diff))
+        commits.append(Commit(branch, message, diff))
+
     return commits
 
 
@@ -202,16 +211,33 @@ def get_commits(
     if author_name is not None:
         cmd.append(f"--author={author_name}")
 
+    commits: list[Commit] = []
+
     with chdir(repo_path):
-        sp = subprocess.run(cmd, capture_output=True)
+        sp = subprocess.run(
+            ["git", "branch", "--format=%(refname:short)"], capture_output=True
+        )
 
         if sp.returncode != 0:
             raise RuntimeError(
-                f"git log command returned non-zero status {sp.returncode}\n{sp.stderr.decode('utf-8')}"
+                f"git branch command exited with non-zero status {sp.returncode}\n{sp.stderr.decode('utf-8')}"
             )
 
-        commits = _parse_git_log(sp.stdout)
-        return commits
+        branches = sp.stdout.decode("utf-8").splitlines()
+        seen_commits: set[str] = set()
+
+        for branch in branches:
+            branch_cmd = [*cmd, f"--branches=*{branch}"]
+            sp = subprocess.run(branch_cmd, capture_output=True)
+
+            if sp.returncode != 0:
+                raise RuntimeError(
+                    f"git log command returned non-zero status {sp.returncode}\n{sp.stderr.decode('utf-8')}"
+                )
+
+            commits.extend(_parse_git_log(branch, sp.stdout, seen_commits))
+
+    return commits
 
 
 def main():
