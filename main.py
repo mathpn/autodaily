@@ -172,8 +172,13 @@ def _parse_git_log(output: bytes) -> list[Commit]:
         sp = subprocess.run(
             ["git", "--no-pager", "diff", "--minimal", f"{commit_hash}^!"],
             capture_output=True,
-            check=True,
         )
+
+        if sp.returncode != 0:
+            raise RuntimeError(
+                f"git diff command returned non-zero status {sp.returncode}\n{sp.stderr.decode('utf-8')}"
+            )
+
         diff = sp.stdout.decode("utf-8")
         commits.append(Commit(message, diff))
     return commits
@@ -198,7 +203,12 @@ def get_commits(
         cmd.append(f"--author={author_name}")
 
     with chdir(repo_path):
-        sp = subprocess.run(cmd, capture_output=True, check=True)
+        sp = subprocess.run(cmd, capture_output=True)
+
+        if sp.returncode != 0:
+            raise RuntimeError(
+                f"git log command returned non-zero status {sp.returncode}\n{sp.stderr.decode('utf-8')}"
+            )
 
         commits = _parse_git_log(sp.stdout)
         return commits
