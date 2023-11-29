@@ -13,6 +13,8 @@ from langchain.globals import set_debug
 from langchain.llms import GPT4All
 from langchain.prompts import PromptTemplate
 from langchain.schema import StrOutputParser
+from langchain.schema.runnable import RunnableParallel, RunnablePassthrough
+from langchain.schema import Document
 from rich.console import Console
 
 MAX_TOKENS = 1024
@@ -35,16 +37,20 @@ COLLAPSE_PROMPT_TEMPLATE = """
 
 REDUCE_PROMPT_TEMPLATE = """
     [INST]
-    The following is set of description of tasks I've done:
+    The following is set of git branches and description of tasks I've done:
     {doc_summaries}
     Take these and distill it into a final, consolidated Markdown list of tasks and achievements.
     [/INST]
     Helpful Answer:
 """
 
+# TODO include branch
 CTX_TEMPLATE = """
     Git message:
     {message}
+
+    Branch:
+    {branch}
 
     Git diff:
     {diff}
@@ -77,7 +83,9 @@ def load_model():
 def format_document(
     commit: Commit, prompt: PromptTemplate, llm, max_tokens: int = MAX_TOKENS
 ):
-    prompt_value = prompt.format(message=commit.message, diff=commit.diff)
+    prompt_value = prompt.format(
+        message=commit.message, branch=commit.branch, diff=commit.diff
+    )
     n_tokens = llm.get_num_tokens(prompt_value)
 
     diff = commit.diff
@@ -90,20 +98,24 @@ def format_document(
             break
         diff_lines = diff_lines[:-1]
         diff = "\n".join(diff_lines)
-        prompt_value = prompt.format(message=commit.message, diff=diff)
+        prompt_value = prompt.format(
+            message=commit.message, branch=commit.branch, diff=diff
+        )
         n_tokens = llm.get_num_tokens(prompt_value)
 
     message = commit.message
     while n_tokens > max_tokens:
         message = message[:-2]
-        prompt_value = prompt.format(message=message, diff=diff)
+        prompt_value = prompt.format(message=message, branch=commit.branch, diff=diff)
         n_tokens = llm.get_num_tokens(prompt_value)
 
     return prompt_value
 
 
 def format_docs(docs) -> str:
-    return "\n\n".join(docs)
+    return "\n\n".join(
+        f"Branch: {doc.metadata['branch']}. Task: {doc.page_content}" for doc in docs
+    )
 
 
 def get_chain():
@@ -125,6 +137,13 @@ def get_chain():
     map_chain = (
         {"context": partial_format_document} | map_prompt | llm | StrOutputParser()
     ).with_config(run_name="Summarize commit")
+    map_as_doc_chain = RunnableParallel(
+        {"doc": RunnablePassthrough(), "content": map_chain}
+    ) | (
+        lambda x: Document(
+            page_content=x["content"], metadata={"branch": x["doc"].branch}
+        )
+    )
 
     collapse_chain = (
         {"doc_summaries": format_docs}
@@ -148,12 +167,12 @@ def get_chain():
 
     reduce_chain = (
         {"doc_summaries": format_docs}
-        | PromptTemplate.from_template(REDUCE_PROMPT_TEMPLATE)
+        | PromptTemplate.from_template(dedent(REDUCE_PROMPT_TEMPLATE))
         | llm
         | StrOutputParser()
     ).with_config(run_name="Reduce")
 
-    map_reduce = (map_chain.map() | collapse | reduce_chain).with_config(
+    map_reduce = (map_as_doc_chain.map() | collapse | reduce_chain).with_config(
         run_name="Map Reduce"
     )
 
@@ -227,6 +246,8 @@ def get_commits(
         seen_commits: set[str] = set()
 
         for branch in branches:
+            # XXX limit to prevent errors due to ill-named branches
+            branch = branch[:75]
             branch_cmd = [*cmd, f"--branches=*{branch}"]
             sp = subprocess.run(branch_cmd, capture_output=True)
 
