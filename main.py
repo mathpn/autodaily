@@ -1,5 +1,6 @@
 import argparse
 import logging
+import multiprocessing
 import os
 import subprocess
 from contextlib import chdir
@@ -68,12 +69,11 @@ def load_model():
     )
     os.makedirs(os.path.dirname(local_path), exist_ok=True)
 
-    # FIXME n_threads
     llm = GPT4All(
         model=local_path,
         allow_download=True,
         verbose=True,
-        n_threads=14,
+        n_threads=multiprocessing.cpu_count() - 1,
         streaming=True,
     )
     return llm, ""
