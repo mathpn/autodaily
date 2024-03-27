@@ -10,11 +10,10 @@ from typing import NamedTuple
 
 from langchain.chains.combine_documents import collapse_docs, split_list_of_docs
 from langchain.globals import set_debug
-from langchain.llms import GPT4All
 from langchain.prompts import PromptTemplate
-from langchain.schema import StrOutputParser
+from langchain.schema import Document, StrOutputParser
 from langchain.schema.runnable import RunnableParallel, RunnablePassthrough
-from langchain.schema import Document
+from langchain_community.llms.gpt4all import GPT4All
 from rich.console import Console
 
 MAX_TOKENS = 1024
@@ -64,16 +63,16 @@ class Commit(NamedTuple):
 
 
 def load_model():
-    # local_path = f"{os.environ['HOME']}/.cache/gpt4all/orca-mini-3b-gguf2-q4_0.gguf"
     local_path = (
         f"{os.environ['HOME']}/.cache/gpt4all/mistral-7b-instruct-v0.1.Q4_0.gguf"
     )
+    os.makedirs(os.path.dirname(local_path), exist_ok=True)
 
     # FIXME n_threads
     llm = GPT4All(
         model=local_path,
+        allow_download=True,
         verbose=True,
-        # device="nvidia",
         n_threads=14,
         streaming=True,
     )
