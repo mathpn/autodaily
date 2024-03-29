@@ -245,7 +245,7 @@ def get_commits(
         seen_commits: set[str] = set()
 
         for branch in branches:
-            # XXX limit to prevent errors due to ill-named branches
+            # NOTE limit to prevent errors due to ill-named branches
             branch = branch[:75]
             branch_cmd = [*cmd, f"--branches=*{branch}"]
             sp = subprocess.run(branch_cmd, capture_output=True)
